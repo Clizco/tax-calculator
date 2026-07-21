@@ -16,4 +16,8 @@ spec:
             requests:
               storage: 1Gi
 
-  params: []
+  params:
+    - name: repo-url
+      value: https://github.com/ibm-developer-skills-network/zntwk-tax_calculator.git
+    - name: repo-revision
+      value: main

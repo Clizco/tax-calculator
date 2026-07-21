@@ -3,11 +3,35 @@ kind: Pipeline
 metadata:
   name: tax-calculator-pipeline
 spec:
+  params:
+    - name: repo-url
+      type: string
+      default: https://github.com/ibm-developer-skills-network/zntwk-tax_calculator.git
+    - name: repo-revision
+      type: string
+      default: main
+
   workspaces:
     - name: shared-data
 
   tasks:
+    - name: fetch-repository
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.repo-revision)
+        - name: deleteExisting
+          value: "true"
+      workspaces:
+        - name: output
+          workspace: shared-data
+
     - name: npm
+      runAfter:
+        - fetch-repository
       taskRef:
         name: npm
       workspaces:
@@ -19,6 +43,15 @@ spec:
         - npm
       taskRef:
         name: jasmine
+      workspaces:
+        - name: source
+          workspace: shared-data
+
+    - name: build-and-deploy
+      runAfter:
+        - jasmine
+      taskRef:
+        name: build-and-deploy
       workspaces:
         - name: source
           workspace: shared-data

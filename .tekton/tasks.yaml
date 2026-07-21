@@ -29,3 +29,110 @@ spec:
         #!/bin/sh
         npm install
         npx jasmine
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-and-deploy
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: build-and-deploy
+      image: quay.io/openshift/origin-cli:latest
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/sh
+        set -eu
+
+        APP_NAME="tax-calculator"
+
+        echo "Creating ImageStream..."
+        cat <<EOF | oc apply -f -
+        apiVersion: image.openshift.io/v1
+        kind: ImageStream
+        metadata:
+          name: ${APP_NAME}
+        EOF
+
+        echo "Creating BuildConfig..."
+        cat <<EOF | oc apply -f -
+        apiVersion: build.openshift.io/v1
+        kind: BuildConfig
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          source:
+            type: Binary
+            binary: {}
+          strategy:
+            type: Docker
+            dockerStrategy:
+              dockerfilePath: Dockerfile
+          output:
+            to:
+              kind: ImageStreamTag
+              name: ${APP_NAME}:latest
+        EOF
+
+        echo "Building image..."
+        oc start-build ${APP_NAME} --from-dir=. --wait --follow
+
+        IMAGE_REFERENCE="$(oc get istag ${APP_NAME}:latest -o jsonpath='{.image.dockerImageReference}')"
+
+        echo "Creating Deployment..."
+        cat <<EOF | oc apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: ${APP_NAME}
+          template:
+            metadata:
+              labels:
+                app: ${APP_NAME}
+            spec:
+              containers:
+                - name: ${APP_NAME}
+                  image: ${IMAGE_REFERENCE}
+                  ports:
+                    - containerPort: 80
+        EOF
+
+        echo "Creating Service..."
+        cat <<EOF | oc apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          selector:
+            app: ${APP_NAME}
+          ports:
+            - port: 80
+              targetPort: 80
+        EOF
+
+        echo "Creating Route..."
+        cat <<EOF | oc apply -f -
+        apiVersion: route.openshift.io/v1
+        kind: Route
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          to:
+            kind: Service
+            name: ${APP_NAME}
+        EOF
+
+        oc rollout status deployment/${APP_NAME} --timeout=180s
+
+        ROUTE_HOST="$(oc get route ${APP_NAME} -o jsonpath='{.spec.host}')"
+
+        echo "Application URL:"
+        echo "https://${ROUTE_HOST}"
