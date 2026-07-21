@@ -11,47 +11,34 @@ spec:
       type: string
       default: main
 
-  workspaces:
-    - name: shared-data
-
   tasks:
-    - name: fetch-repository
-      taskRef:
-        name: git-clone
-      params:
-        - name: url
-          value: $(params.repo-url)
-        - name: revision
-          value: $(params.repo-revision)
-        - name: deleteExisting
-          value: "true"
-      workspaces:
-        - name: output
-          workspace: shared-data
-
     - name: npm
-      runAfter:
-        - fetch-repository
       taskRef:
         name: npm
-      workspaces:
-        - name: source
-          workspace: shared-data
+      params:
+        - name: repo-url
+          value: $(params.repo-url)
+        - name: repo-revision
+          value: $(params.repo-revision)
 
     - name: jasmine
       runAfter:
         - npm
       taskRef:
         name: jasmine
-      workspaces:
-        - name: source
-          workspace: shared-data
+      params:
+        - name: repo-url
+          value: $(params.repo-url)
+        - name: repo-revision
+          value: $(params.repo-revision)
 
     - name: build-and-deploy
       runAfter:
         - jasmine
       taskRef:
         name: build-and-deploy
-      workspaces:
-        - name: source
-          workspace: shared-data
+      params:
+        - name: repo-url
+          value: $(params.repo-url)
+        - name: repo-revision
+          value: $(params.repo-revision)

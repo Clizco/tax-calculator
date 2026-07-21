@@ -1,23 +1,174 @@
 apiVersion: tekton.dev/v1beta1
-kind: PipelineRun
+kind: Task
 metadata:
-  generateName: tax-calculator-run-
+  name: npm
 spec:
-  pipelineRef:
-    name: tax-calculator-pipeline
-
-  workspaces:
-    - name: shared-data
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: 1Gi
-
   params:
     - name: repo-url
-      value: https://github.com/ibm-developer-skills-network/zntwk-tax_calculator.git
+      type: string
     - name: repo-revision
-      value: main
+      type: string
+      default: main
+  steps:
+    - name: npm-install
+      image: node:18
+      script: |
+        #!/bin/sh
+        set -eu
+        rm -rf /tmp/src
+        git clone --depth 1 --branch "$(params.repo-revision)" "$(params.repo-url)" /tmp/src
+        cd /tmp/src
+        npm install
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: jasmine
+spec:
+  params:
+    - name: repo-url
+      type: string
+    - name: repo-revision
+      type: string
+      default: main
+  steps:
+    - name: run-jasmine
+      image: node:18
+      script: |
+        #!/bin/sh
+        set -eu
+        rm -rf /tmp/src
+        git clone --depth 1 --branch "$(params.repo-revision)" "$(params.repo-url)" /tmp/src
+        cd /tmp/src
+        npm install
+        npx jasmine
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-and-deploy
+spec:
+  params:
+    - name: repo-url
+      type: string
+    - name: repo-revision
+      type: string
+      default: main
+  steps:
+    - name: clone-source
+      image: alpine/git:2.45.2
+      script: |
+        #!/bin/sh
+        set -eu
+        rm -rf /workspace/src
+        git clone --depth 1 --branch "$(params.repo-revision)" "$(params.repo-url)" /workspace/src
+
+    - name: deploy
+      image: quay.io/openshift/origin-cli:latest
+      script: |
+        #!/bin/sh
+        set -eu
+
+        APP_NAME="tax-calculator"
+        cd /workspace/src
+
+        # Forzar Dockerfile compatible con OpenShift restricted-v2
+        cat > Dockerfile <<'EOD'
+        FROM nginxinc/nginx-unprivileged:stable-alpine
+        COPY favicon.ico /usr/share/nginx/html/favicon.ico
+        COPY index.html /usr/share/nginx/html/index.html
+        COPY script.js /usr/share/nginx/html/script.js
+        COPY style.css /usr/share/nginx/html/style.css
+        COPY taxCalculator.js /usr/share/nginx/html/taxCalculator.js
+        EXPOSE 8080
+        EOD
+
+        echo "Creating ImageStream..."
+        cat <<EOT | oc apply -f -
+        apiVersion: image.openshift.io/v1
+        kind: ImageStream
+        metadata:
+          name: ${APP_NAME}
+        EOT
+
+        echo "Creating BuildConfig..."
+        cat <<EOT | oc apply -f -
+        apiVersion: build.openshift.io/v1
+        kind: BuildConfig
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          source:
+            type: Binary
+            binary: {}
+          strategy:
+            type: Docker
+            dockerStrategy:
+              dockerfilePath: Dockerfile
+          output:
+            to:
+              kind: ImageStreamTag
+              name: ${APP_NAME}:latest
+        EOT
+
+        echo "Building image..."
+        oc start-build ${APP_NAME} --from-dir=. --wait --follow
+
+        IMAGE_REFERENCE="$(oc get istag ${APP_NAME}:latest -o jsonpath='{.image.dockerImageReference}')"
+
+        echo "Creating Deployment..."
+        cat <<EOT | oc apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: ${APP_NAME}
+          template:
+            metadata:
+              labels:
+                app: ${APP_NAME}
+            spec:
+              containers:
+                - name: ${APP_NAME}
+                  image: ${IMAGE_REFERENCE}
+                  ports:
+                    - containerPort: 8080
+        EOT
+
+        echo "Creating Service..."
+        cat <<EOT | oc apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          selector:
+            app: ${APP_NAME}
+          ports:
+            - port: 80
+              targetPort: 8080
+        EOT
+
+        echo "Creating Route..."
+        cat <<EOT | oc apply -f -
+        apiVersion: route.openshift.io/v1
+        kind: Route
+        metadata:
+          name: ${APP_NAME}
+        spec:
+          to:
+            kind: Service
+            name: ${APP_NAME}
+        EOT
+
+        oc rollout status deployment/${APP_NAME} --timeout=600s
+
+        ROUTE_HOST="$(oc get route ${APP_NAME} -o jsonpath='{.spec.host}')"
+        echo "Application URL:"
+        echo "https://${ROUTE_HOST}"
