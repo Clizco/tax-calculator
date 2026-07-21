@@ -3,14 +3,21 @@ kind: Task
 metadata:
   name: npm
 spec:
-  workspaces:
-    - name: source
+  params:
+    - name: repo-url
+      type: string
+    - name: repo-revision
+      type: string
+      default: main
   steps:
     - name: npm-install
       image: node:18
-      workingDir: $(workspaces.source.path)
       script: |
         #!/bin/sh
+        set -eu
+        rm -rf /tmp/src
+        git clone --depth 1 --branch "$(params.repo-revision)" "$(params.repo-url)" /tmp/src
+        cd /tmp/src
         npm install
 
 ---
@@ -19,14 +26,21 @@ kind: Task
 metadata:
   name: jasmine
 spec:
-  workspaces:
-    - name: source
+  params:
+    - name: repo-url
+      type: string
+    - name: repo-revision
+      type: string
+      default: main
   steps:
     - name: run-jasmine
       image: node:18
-      workingDir: $(workspaces.source.path)
       script: |
         #!/bin/sh
+        set -eu
+        rm -rf /tmp/src
+        git clone --depth 1 --branch "$(params.repo-revision)" "$(params.repo-url)" /tmp/src
+        cd /tmp/src
         npm install
         npx jasmine
 
@@ -36,28 +50,51 @@ kind: Task
 metadata:
   name: build-and-deploy
 spec:
-  workspaces:
-    - name: source
+  params:
+    - name: repo-url
+      type: string
+    - name: repo-revision
+      type: string
+      default: main
   steps:
-    - name: build-and-deploy
+    - name: clone-source
+      image: alpine/git:2.45.2
+      script: |
+        #!/bin/sh
+        set -eu
+        rm -rf /workspace/src
+        git clone --depth 1 --branch "$(params.repo-revision)" "$(params.repo-url)" /workspace/src
+
+    - name: deploy
       image: quay.io/openshift/origin-cli:latest
-      workingDir: $(workspaces.source.path)
       script: |
         #!/bin/sh
         set -eu
 
         APP_NAME="tax-calculator"
+        cd /workspace/src
+
+        # Forzar Dockerfile compatible con OpenShift restricted-v2
+        cat > Dockerfile <<'EOD'
+        FROM nginxinc/nginx-unprivileged:stable-alpine
+        COPY favicon.ico /usr/share/nginx/html/favicon.ico
+        COPY index.html /usr/share/nginx/html/index.html
+        COPY script.js /usr/share/nginx/html/script.js
+        COPY style.css /usr/share/nginx/html/style.css
+        COPY taxCalculator.js /usr/share/nginx/html/taxCalculator.js
+        EXPOSE 8080
+        EOD
 
         echo "Creating ImageStream..."
-        cat <<EOF | oc apply -f -
+        cat <<EOT | oc apply -f -
         apiVersion: image.openshift.io/v1
         kind: ImageStream
         metadata:
           name: ${APP_NAME}
-        EOF
+        EOT
 
         echo "Creating BuildConfig..."
-        cat <<EOF | oc apply -f -
+        cat <<EOT | oc apply -f -
         apiVersion: build.openshift.io/v1
         kind: BuildConfig
         metadata:
@@ -74,7 +111,7 @@ spec:
             to:
               kind: ImageStreamTag
               name: ${APP_NAME}:latest
-        EOF
+        EOT
 
         echo "Building image..."
         oc start-build ${APP_NAME} --from-dir=. --wait --follow
@@ -82,7 +119,7 @@ spec:
         IMAGE_REFERENCE="$(oc get istag ${APP_NAME}:latest -o jsonpath='{.image.dockerImageReference}')"
 
         echo "Creating Deployment..."
-        cat <<EOF | oc apply -f -
+        cat <<EOT | oc apply -f -
         apiVersion: apps/v1
         kind: Deployment
         metadata:
@@ -101,11 +138,11 @@ spec:
                 - name: ${APP_NAME}
                   image: ${IMAGE_REFERENCE}
                   ports:
-                    - containerPort: 80
-        EOF
+                    - containerPort: 8080
+        EOT
 
         echo "Creating Service..."
-        cat <<EOF | oc apply -f -
+        cat <<EOT | oc apply -f -
         apiVersion: v1
         kind: Service
         metadata:
@@ -115,11 +152,11 @@ spec:
             app: ${APP_NAME}
           ports:
             - port: 80
-              targetPort: 80
-        EOF
+              targetPort: 8080
+        EOT
 
         echo "Creating Route..."
-        cat <<EOF | oc apply -f -
+        cat <<EOT | oc apply -f -
         apiVersion: route.openshift.io/v1
         kind: Route
         metadata:
@@ -128,11 +165,10 @@ spec:
           to:
             kind: Service
             name: ${APP_NAME}
-        EOF
+        EOT
 
-        oc rollout status deployment/${APP_NAME} --timeout=180s
+        oc rollout status deployment/${APP_NAME} --timeout=600s
 
         ROUTE_HOST="$(oc get route ${APP_NAME} -o jsonpath='{.spec.host}')"
-
         echo "Application URL:"
         echo "https://${ROUTE_HOST}"
